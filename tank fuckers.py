@@ -1,0 +1,1012 @@
+from OpenGL.GL import *
+from OpenGL.GLUT import *
+from OpenGL.GLU import *
+import math, random, time
+
+"""
+3D Tank Battle – single file prototype using only OpenGL.GL / GLUT / GLU and stdlib.
+Controls (required):
+  WASD = drive (W/S forward/back, A/D strafe left/right)
+  Q/E  = rotate turret left/right (independent of hull)
+  Mouse Move = also rotate turret 360° (relative)
+  LMB = fire shell
+  RMB = toggle First-Person / Third-Person camera
+  Esc = pause/resume (Pause Menu)
+  1/2 = Start Survival / Time-Attack (from Main Menu)
+  R   = Restart when Game Over
+  C   = Toggle Cheat (auto-aim + double shell speed + infinite health)
+  V   = In Cheat+FP: lock/unlock FP yaw follow
+  Arrow Keys = rotate orbit camera and change height (3rd person)
+
+Project features implemented:
+- Player tank with independent turret; strafing movement; FP/TP cameras
+- Shells faster than bullets (we only have shells). Explode on impact (flash) + ricochet off walls
+- Enemy tanks with two archetypes (rapid / heavy) that flank & fire
+- Cheat mode (auto-aim nearest, double speed, infinite health)
+- HUD: health bar, ammo counter, score, timer, mode; minimap radar
+- Menus: Main, Pause, Game Over
+- Power-ups: health kit, faster reload, shield (temporary)
+- Modes: Survival (endless), Time Attack 2:00
+
+Notes:
+- This is a teaching/prototype code. Geometry is simple; logic is compact.
+- No external assets; PyOpenGL + GLUT only.
+"""
+
+# ------------------------------- Window / Camera -------------------------------
+WIN_W, WIN_H = 1200, 800
+ASPECT = WIN_W / WIN_H
+FOV = 75
+
+ARENA = 700
+TILE = 70
+TREE_COUNT = 60
+tree_positions = [(random.uniform(-3000, 3000), random.uniform(-3000, 3000)) for _ in range(TREE_COUNT)]
+# ...existing code...
+class Camera:
+    def __init__(self):
+        self.orbit = 35.0
+        self.height = 260.0
+        self.dist = 900.0
+        self.fp = False
+        self.fp_yaw_lock = None
+    def rotate(self, d): self.orbit = (self.orbit + d) % 360.0
+    def move_height(self, d): self.height = max(140.0, min(900.0, self.height + d))
+
+# ------------------------------- Entities -------------------------------
+class Player:
+    def __init__(self):
+        self.x = 0.0; self.y = 0.0; self.z = 0.0
+        self.rot = 0.0                 # hull yaw (for FP only)
+        self.turret = 0.0              # turret yaw (independent)
+        self.speed = 260.0
+        self.radius = 28.0
+        self.hp_max = 100
+        self.hp = self.hp_max
+        self.shield = 0.0              # seconds of shield
+        self.reload = 0.35             # base shoot delay
+        self.reload_timer = 0.0
+        self.ammo_max = math.inf
+        self.ammo = self.ammo_max
+        self.score = 0
+        self.flash = 0.0               # hit flash
+    def head_pos(self):
+        return self.x, self.y, self.z + 58.0
+    def cannon_pos(self):
+        r = math.radians(self.turret)
+        offx, offy, offz = 36.0, 0.0, 46.0
+        return (self.x + offx*math.cos(r) - offy*math.sin(r),
+                self.y + offx*math.sin(r) + offy*math.cos(r),
+                self.z + offz)
+
+class Enemy:
+    def __init__(self, kind="rapid"):
+        self.kind = kind
+        self.x, self.y = spawn_pos()
+        self.z = 0.0
+        self.rot = random.uniform(0,360)
+        self.turret = self.rot
+        self.radius = 26.0
+        self.hp = 50; self.speed = 120; self.reload = 0.8; self.damage = 3
+        self.reload_timer = random.uniform(0.0, self.reload)
+        self.time = random.uniform(0,10)
+        self.recoil_timer = 0.0  # Add recoil timer
+
+class PowerUp:
+    def __init__(self, kind):
+        self.kind = kind                # "health", "reload", "shield"
+        self.x, self.y = spawn_pos(inner=0.65)
+        self.z = 0
+        self.time = 0.0
+
+# ------------------------------- Game State -------------------------------
+class Game:
+    def __init__(self):
+        self.state = 'menu'             # 'menu', 'playing', 'paused', 'gameover'
+        self.mode = None               # 'survival' or 'time'
+        self.start_time = 0.0
+        self.time_limit = 120.0        # for time mode
+        self.cheat = False
+        self.cam_paused = False
+        self.last_time = None
+        self.enemies = []
+        self.bullets = []              # player + enemy shells
+        self.effects = []              # explosions
+        self.powerups = []
+        self.wave_timer = 0.0          # spawn pacing (survival)
+        self.min_spawn_gap = 2.0
+        self.max_enemies = 8
+
+# Bullet record
+# {x,y,z, dx,dy, speed, life, owner:'player'|'enemy', bounces:int, dmg:int}
+
+cam = Camera()
+player = Player()
+game = Game()
+keys = set()
+mouse_last = None
+
+# ------------------------------- Helpers -------------------------------
+def clamp(v, lo, hi): return max(lo, min(hi, v))
+def to_rad(deg): return deg*math.pi/180.0
+
+def spawn_pos(inner=0.85):
+    r = ARENA*inner
+    a = random.uniform(0, 2*math.pi)
+    return r*math.cos(a), r*math.sin(a)
+
+# ------------------------------- Rendering -------------------------------
+
+def draw_floor():
+    # Infinite grid centered on player
+    half = 3000  # 3000 units in each direction from player
+    step = TILE
+    px = int(player.x // step) * step
+    py = int(player.y // step) * step
+    for x in range(px - half, px + half, step):
+        for y in range(py - half, py + half, step):
+            glColor3f(1.0, 1.0, 1.0)
+            glBegin(GL_QUADS)
+            glVertex3f(x, y, 0)
+            glVertex3f(x+step, y, 0)
+            glVertex3f(x+step, y+step, 0)
+            glVertex3f(x, y+step, 0)
+            glEnd()
+
+def draw_trees():
+    # Draw big trees near player
+    for tx, ty in tree_positions:
+        if abs(tx-player.x)<1500 and abs(ty-player.y)<1500:
+            glPushMatrix()
+            glTranslatef(tx, ty, 0)
+            glColor3f(0.3, 0.2, 0.1)
+            glutSolidCylinder(12, 120, 12, 1)
+            glTranslatef(0, 0, 120)
+            glColor3f(0.1, 0.6, 0.2)
+            glutSolidSphere(60, 16, 16)
+            glPopMatrix()
+
+def draw_player():
+    glPushMatrix()
+    glTranslatef(player.x, player.y, player.z)
+    # hull (simple box)
+    glColor3f(0.25,0.55,0.25)
+    glPushMatrix(); glTranslatef(0,0,36); glScalef(56,34,28); glutSolidCube(1); glPopMatrix()
+    # turret base
+    glColor3f(0.1,0.3,0.1)
+    glPushMatrix(); glTranslatef(8,0,48); glScalef(26,22,16); glutSolidCube(1); glPopMatrix()
+    # turret head rotating
+    glPushMatrix()
+    glTranslatef(8,0,52)
+    glRotatef(player.turret, 0,0,1)
+    glColor3f(0.4,0.4,0.4)
+    glutSolidSphere(10, 14, 14)
+    # cannon
+    glColor3f(0.6,0.6,0.6)
+    glPushMatrix(); glRotatef(90,0,1,0); glutSolidCylinder(3.0, 36.0, 16, 1); glPopMatrix()
+    glPopMatrix()
+    # Wheels: aligned, slightly lower and closer to hull
+    glColor3f(0.1,0.1,0.1)
+    for i in range(-2, 4):
+        glPushMatrix()
+        glTranslatef(-20 + i*14, -17, 10)
+        glRotatef(90, 1, 0, 0)
+        glutSolidTorus(2, 6, 8, 8)
+        glPopMatrix()
+        glPushMatrix()
+        glTranslatef(-20 + i*14, 17, 10)
+        glRotatef(90, 1, 0, 0)
+        glutSolidTorus(2, 6, 8, 8)
+        glPopMatrix()
+    # hit flash
+    if player.flash>0.0:
+        a = clamp(player.flash,0,1)
+        glColor4f(1,0,0,a)
+        glPushMatrix(); glTranslatef(0,0,60); glutWireSphere(40, 8, 8); glPopMatrix()
+    glPopMatrix()
+
+
+def draw_enemy(e: Enemy):
+    glPushMatrix(); glTranslatef(e.x, e.y, e.z)
+    glColor3f(0.7,0.2,0.2)  # Identical color for both types
+    glPushMatrix(); glTranslatef(0,0,32); glScalef(50,32,24); glutSolidCube(1); glPopMatrix()
+    glPushMatrix(); glTranslatef(6,0,46); glRotatef(e.turret, 0,0,1)
+    glColor3f(0.2,0.2,0.2); glutSolidSphere(9, 12, 12)
+    glColor3f(0.35,0.35,0.35); glRotatef(90,0,1,0); glutSolidCylinder(2.6, 30.0, 12, 1)
+    glPopMatrix()
+    # Wheels: aligned, slightly lower and closer to hull
+    glColor3f(0.1,0.1,0.1)
+    for i in range(-2, 4):
+        glPushMatrix()
+        glTranslatef(-18 + i*12, -15, 8)
+        glRotatef(90, 1, 0, 0)
+        glutSolidTorus(2, 5, 8, 8)
+        glPopMatrix()
+        glPushMatrix()
+        glTranslatef(-18 + i*12, 15, 8)
+        glRotatef(90, 1, 0, 0)
+        glutSolidTorus(2, 5, 8, 8)
+        glPopMatrix()
+    glPopMatrix()
+
+
+def draw_powerup(p: PowerUp):
+    glPushMatrix(); glTranslatef(p.x, p.y, 14)
+    if p.kind=="health": glColor3f(0.1,0.9,0.1)
+    elif p.kind=="reload": glColor3f(0.1,0.6,1.0)
+    else: glColor3f(0.9,0.9,0.1)
+    glutSolidIcosahedron(); glPopMatrix()
+
+
+def draw_bullet(b):
+    glPushMatrix(); glTranslatef(b["x"], b["y"], b["z"])
+    if b["owner"]=="player": glColor3f(1,1,0.2)
+    else: glColor3f(1,0.4,0.1)
+    glutSolidSphere(6, 10, 10)
+    glPopMatrix()
+
+
+def draw_explosion(ex):
+    # ex: {x,y,z, r, life}
+    glPushMatrix(); glTranslatef(ex["x"], ex["y"], ex["z"])
+    glColor4f(1,0.5,0.1,1)
+    glutWireSphere(ex["r"], 10, 10)
+    glPopMatrix()
+
+# ------------------------------- UI -------------------------------
+
+def draw_text(x, y, s, size=18):
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, WIN_W, 0, WIN_H)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+    glDisable(GL_DEPTH_TEST)
+    glColor3f(1,1,1)
+    glRasterPos2f(x, WIN_H-y)
+    font = GLUT_BITMAP_HELVETICA_18 if size>=18 else GLUT_BITMAP_9_BY_15
+    for ch in s: glutBitmapCharacter(font, ord(ch))
+    glEnable(GL_DEPTH_TEST)
+    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
+
+def draw_bar(x, y, w, h, t):
+    # t in [0,1]
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, WIN_W, 0, WIN_H)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity(); glDisable(GL_DEPTH_TEST)
+    glColor3f(0.2,0.2,0.2)
+    glBegin(GL_QUADS); glVertex2f(x,y); glVertex2f(x+w,y); glVertex2f(x+w,y+h); glVertex2f(x,y+h); glEnd()
+    glColor3f(0.2,0.8,0.2)
+    glBegin(GL_QUADS); glVertex2f(x+2,y+2); glVertex2f(x+2 + (w-4)*t,y+2); glVertex2f(x+2 + (w-4)*t,y+h-2); glVertex2f(x+2,y+h-2); glEnd()
+    glEnable(GL_DEPTH_TEST)
+    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
+
+def draw_minimap():
+    # simple radar bottom-right
+    r = 90; cx = WIN_W - r - 20; cy = r + 20
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, WIN_W, 0, WIN_H)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity(); glDisable(GL_DEPTH_TEST)
+    # background black
+    glColor3f(0.0,0.0,0.0)
+    glBegin(GL_POLYGON)
+    for i in range(64):
+        a = 2*math.pi*i/64
+        glVertex2f(cx + r*math.cos(a), cy + r*math.sin(a))
+    glEnd()
+    # border
+    glColor3f(0.1,0.1,0.1)
+    glBegin(GL_LINE_LOOP)
+    for i in range(64):
+        a = 2*math.pi*i/64
+        glVertex2f(cx + r*math.cos(a), cy + r*math.sin(a))
+    glEnd()
+    # player at center
+    glPointSize(6); glBegin(GL_POINTS); glColor3f(0.2,1,0.2); glVertex2f(cx,cy); glEnd()
+    # enemies
+    glPointSize(4); glBegin(GL_POINTS); glColor3f(1,0.2,0.2)
+    for e in game.enemies:
+        dx = e.x - player.x
+        dy = e.y - player.y
+        dist = math.hypot(dx, dy)
+        max_dist = ARENA
+        if dist > max_dist:
+            scale = max_dist / dist
+            dx *= scale
+            dy *= scale
+        ex = dx / ARENA
+        ey = dy / ARENA
+        glVertex2f(cx + ex*r, cy + ey*r)
+    glEnd()
+    glEnable(GL_DEPTH_TEST)
+    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
+# ------------------------------- Camera -------------------------------
+
+def setup_camera():
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); gluPerspective(FOV, ASPECT, 0.1, 3000.0)
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity()
+    if cam.fp:
+        hx, hy, hz = player.head_pos()
+        a = to_rad(player.turret if (game.cheat and game.cam_paused and cam.fp_yaw_lock is not None) else player.turret)
+        cx = hx - math.cos(a)*0.1; cy = hy - math.sin(a)*0.1; cz = hz*2
+        tx = hx + math.cos(a)*150.0; ty = hy + math.sin(a)*150.0; tz = hz
+        gluLookAt(cx,cy,cz, tx,ty,tz, 0,0,1)
+    else:
+        a = to_rad(cam.orbit)
+        cx = player.x + math.cos(a)*cam.dist
+        cy = player.y + math.sin(a)*cam.dist
+        cz = cam.height
+        gluLookAt(cx,cy,cz, player.x, player.y, 40.0, 0,0,1)
+
+# ------------------------------- Game Logic -------------------------------
+
+PLAYER_BULLET_SPEED = 820.0
+ENEMY_BULLET_SPEED = 520.0
+BULLET_LIFE = 5.0
+MAX_BOUNCES = 2
+
+POWERUP_SPAWN_EVERY = 10.0
+POWERUP_LIFE = 18.0
+
+
+def reset_game(mode=None):
+    game.state = 'menu' if mode is None else 'playing'
+    game.mode = mode
+    game.start_time = time.time()
+    game.cheat = False
+    game.cam_paused = False
+    game.last_time = None
+    game.enemies = []
+    game.bullets = []
+    game.effects = []
+    game.powerups = []
+    game.wave_timer = 0.0
+    player.x = player.y = 0.0; player.z = 0.0
+    player.rot = 0.0; player.turret = 0.0
+    player.hp = player.hp_max
+    player.shield = 0.0
+    player.reload = 0.35
+    player.reload_timer = 0.0
+    player.ammo = player.ammo_max
+    player.score = 0
+    # seed enemies
+    for _ in range(5): game.enemies.append(Enemy(kind=random.choice(["rapid","heavy"])) )
+
+
+def time_left():
+    if game.mode != 'time': return None
+    remain = game.time_limit - (time.time() - game.start_time)
+    return max(0.0, remain)
+
+
+def can_shoot():
+    return player.reload_timer <= 0.0 and player.ammo>0
+
+
+def add_explosion(x,y,z, power=26):
+    game.effects.append({"x":x,"y":y,"z":z,"r":power,"life":0.25})
+
+
+def shoot(owner, tx=None, ty=None):
+    if owner=='player':
+        if not can_shoot(): return
+        gx, gy, gz = player.cannon_pos()
+        if tx is None:
+            a = to_rad(player.turret)
+            dx, dy = math.cos(a), math.sin(a)
+        else:
+            dx, dy = tx-gx, ty-gy; d = math.hypot(dx,dy) or 1.0; dx/=d; dy/=d
+        spd = PLAYER_BULLET_SPEED*(2.0 if game.cheat else 1.0)
+        game.bullets.append({"x":gx,"y":gy,"z":gz, "dx":dx,"dy":dy, "speed":spd, "life":0.0,
+                              "owner":"player", "bounces":MAX_BOUNCES, "dmg":18})
+        player.reload_timer = max(0.1, player.reload*(0.5 if player.reload<0.3 else 1.0))
+        player.ammo -= 1
+    else:
+        e = owner
+        a = to_rad(e.turret)
+        gx = e.x + math.cos(a)*30.0; gy = e.y + math.sin(a)*30.0; gz = 40.0
+        game.bullets.append({"x":gx,"y":gy,"z":gz, "dx":math.cos(a),"dy":math.sin(a),
+                              "speed":ENEMY_BULLET_SPEED, "life":0.0, "owner":"enemy",
+                              "bounces":1, "dmg":e.damage})
+        e.reload_timer = e.reload
+
+
+def auto_aim_and_fire():
+    if not game.cheat: return
+    if not can_shoot(): return
+    target = None; best = 1e9
+    for e in game.enemies:
+        d = math.hypot(e.x-player.x, e.y-player.y)
+        if d<best: best=d; target=e
+    if target is None: return
+    shoot('player', target.x, target.y)
+
+
+def draw_floor():
+    half = ARENA - 8
+    for x in range(-half, half, TILE):
+        for y in range(-half, half, TILE):
+            # Bright white tiles
+            glColor3f(1.0, 1.0, 1.0)
+            glBegin(GL_QUADS)
+            glVertex3f(x, y, 0)
+            glVertex3f(x+TILE, y, 0)
+            glVertex3f(x+TILE, y+TILE, 0)
+            glVertex3f(x, y+TILE, 0)
+            glEnd()
+
+def draw_walls():
+    h, t = 160, 8
+    def wall(x,y,sx,sy,sz,col):
+        glColor3f(*col); glPushMatrix()
+        glTranslatef(x,y,h/2); glScalef(sx,sy,sz); glutSolidCube(1); glPopMatrix()
+    wall(-ARENA,0,t,ARENA*2,h,(0.2,0.35,0.9))
+    wall( ARENA,0,t,ARENA*2,h,(0.0,0.6,0.3))
+    wall(0, ARENA,ARENA*2,t,h,(0.3,0.8,0.9))
+    wall(0,-ARENA,ARENA*2,t,h,(0.1,0.45,0.6))
+
+
+def draw_player():
+    glPushMatrix()
+    glTranslatef(player.x, player.y, player.z)
+    # hull (simple box)
+    glColor3f(0.25,0.55,0.25)
+    glPushMatrix(); glTranslatef(0,0,36); glScalef(56,34,28); glutSolidCube(1); glPopMatrix()
+    # turret base
+    glColor3f(0.1,0.3,0.1)
+    glPushMatrix(); glTranslatef(8,0,48); glScalef(26,22,16); glutSolidCube(1); glPopMatrix()
+    # turret head rotating
+    glPushMatrix()
+    glTranslatef(8,0,52)
+    glRotatef(player.turret, 0,0,1)
+    glColor3f(0.4,0.4,0.4)
+    glutSolidSphere(10, 14, 14)
+    # cannon
+    glColor3f(0.6,0.6,0.6)
+    glPushMatrix(); glRotatef(90,0,1,0); glutSolidCylinder(3.0, 36.0, 16, 1); glPopMatrix()
+    glPopMatrix()
+    # Wheels: aligned, slightly lower and closer to hull
+    glColor3f(0.1,0.1,0.1)
+    for i in range(-2, 4):
+        glPushMatrix()
+        glTranslatef(-20 + i*14, -17, 10)
+        glRotatef(90, 1, 0, 0)
+        glutSolidTorus(2, 6, 8, 8)
+        glPopMatrix()
+        glPushMatrix()
+        glTranslatef(-20 + i*14, 17, 10)
+        glRotatef(90, 1, 0, 0)
+        glutSolidTorus(2, 6, 8, 8)
+        glPopMatrix()
+    # hit flash
+    if player.flash>0.0:
+        a = clamp(player.flash,0,1)
+        glColor4f(1,0,0,a)
+        glPushMatrix(); glTranslatef(0,0,60); glutWireSphere(40, 8, 8); glPopMatrix()
+    glPopMatrix()
+
+
+def draw_enemy(e: Enemy):
+    glPushMatrix(); glTranslatef(e.x, e.y, e.z)
+    glColor3f(0.7,0.2,0.2)  # Identical color for both types
+    glPushMatrix(); glTranslatef(0,0,32); glScalef(50,32,24); glutSolidCube(1); glPopMatrix()
+    glPushMatrix(); glTranslatef(6,0,46); glRotatef(e.turret, 0,0,1)
+    glColor3f(0.2,0.2,0.2); glutSolidSphere(9, 12, 12)
+    glColor3f(0.35,0.35,0.35); glRotatef(90,0,1,0); glutSolidCylinder(2.6, 30.0, 12, 1)
+    glPopMatrix()
+    # Wheels: aligned, slightly lower and closer to hull
+    glColor3f(0.1,0.1,0.1)
+    for i in range(-2, 4):
+        glPushMatrix()
+        glTranslatef(-18 + i*12, -15, 8)
+        glRotatef(90, 1, 0, 0)
+        glutSolidTorus(2, 5, 8, 8)
+        glPopMatrix()
+        glPushMatrix()
+        glTranslatef(-18 + i*12, 15, 8)
+        glRotatef(90, 1, 0, 0)
+        glutSolidTorus(2, 5, 8, 8)
+        glPopMatrix()
+    glPopMatrix()
+
+
+def draw_powerup(p: PowerUp):
+    glPushMatrix(); glTranslatef(p.x, p.y, 14)
+    if p.kind=="health": glColor3f(0.1,0.9,0.1)
+    elif p.kind=="reload": glColor3f(0.1,0.6,1.0)
+    else: glColor3f(0.9,0.9,0.1)
+    glutSolidIcosahedron(); glPopMatrix()
+
+
+def draw_bullet(b):
+    glPushMatrix(); glTranslatef(b["x"], b["y"], b["z"])
+    if b["owner"]=="player": glColor3f(1,1,0.2)
+    else: glColor3f(1,0.4,0.1)
+    glutSolidSphere(6, 10, 10)
+    glPopMatrix()
+
+
+def draw_explosion(ex):
+    # ex: {x,y,z, r, life}
+    glPushMatrix(); glTranslatef(ex["x"], ex["y"], ex["z"])
+    glColor4f(1,0.5,0.1,1)
+    glutWireSphere(ex["r"], 10, 10)
+    glPopMatrix()
+
+# ------------------------------- UI -------------------------------
+
+def draw_text(x, y, s, size=18):
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, WIN_W, 0, WIN_H)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+    glDisable(GL_DEPTH_TEST)
+    glColor3f(1,1,1)
+    glRasterPos2f(x, WIN_H-y)
+    font = GLUT_BITMAP_HELVETICA_18 if size>=18 else GLUT_BITMAP_9_BY_15
+    for ch in s: glutBitmapCharacter(font, ord(ch))
+    glEnable(GL_DEPTH_TEST)
+    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
+
+def draw_bar(x, y, w, h, t):
+    # t in [0,1]
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, WIN_W, 0, WIN_H)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity(); glDisable(GL_DEPTH_TEST)
+    glColor3f(0.2,0.2,0.2)
+    glBegin(GL_QUADS); glVertex2f(x,y); glVertex2f(x+w,y); glVertex2f(x+w,y+h); glVertex2f(x,y+h); glEnd()
+    glColor3f(0.2,0.8,0.2)
+    glBegin(GL_QUADS); glVertex2f(x+2,y+2); glVertex2f(x+2 + (w-4)*t,y+2); glVertex2f(x+2 + (w-4)*t,y+h-2); glVertex2f(x+2,y+h-2); glEnd()
+    glEnable(GL_DEPTH_TEST)
+    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
+
+def draw_minimap():
+    # simple radar bottom-right
+    r = 90; cx = WIN_W - r - 20; cy = r + 20
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, WIN_W, 0, WIN_H)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity(); glDisable(GL_DEPTH_TEST)
+    # background black
+    glColor3f(0.0,0.0,0.0)
+    glBegin(GL_POLYGON)
+    for i in range(64):
+        a = 2*math.pi*i/64
+        glVertex2f(cx + r*math.cos(a), cy + r*math.sin(a))
+    glEnd()
+    # border
+    glColor3f(0.1,0.1,0.1)
+    glBegin(GL_LINE_LOOP)
+    for i in range(64):
+        a = 2*math.pi*i/64
+        glVertex2f(cx + r*math.cos(a), cy + r*math.sin(a))
+    glEnd()
+    # player at center
+    glPointSize(6); glBegin(GL_POINTS); glColor3f(0.2,1,0.2); glVertex2f(cx,cy); glEnd()
+    # enemies
+    glPointSize(4); glBegin(GL_POINTS); glColor3f(1,0.2,0.2)
+    for e in game.enemies:
+        dx = e.x - player.x
+        dy = e.y - player.y
+        dist = math.hypot(dx, dy)
+        max_dist = ARENA
+        if dist > max_dist:
+            scale = max_dist / dist
+            dx *= scale
+            dy *= scale
+        ex = dx / ARENA
+        ey = dy / ARENA
+        glVertex2f(cx + ex*r, cy + ey*r)
+    glEnd()
+    glEnable(GL_DEPTH_TEST)
+    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
+# ------------------------------- Camera -------------------------------
+
+def setup_camera():
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); gluPerspective(FOV, ASPECT, 0.1, 3000.0)
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity()
+    if cam.fp:
+        hx, hy, hz = player.head_pos()
+        a = to_rad(player.turret if (game.cheat and game.cam_paused and cam.fp_yaw_lock is not None) else player.turret)
+        cx = hx - math.cos(a)*0.1; cy = hy - math.sin(a)*0.1; cz = hz*2
+        tx = hx + math.cos(a)*150.0; ty = hy + math.sin(a)*150.0; tz = hz
+        gluLookAt(cx,cy,cz, tx,ty,tz, 0,0,1)
+    else:
+        a = to_rad(cam.orbit)
+        cx = player.x + math.cos(a)*cam.dist
+        cy = player.y + math.sin(a)*cam.dist
+        cz = cam.height
+        gluLookAt(cx,cy,cz, player.x, player.y, 40.0, 0,0,1)
+
+# ------------------------------- Game Logic -------------------------------
+
+PLAYER_BULLET_SPEED = 820.0
+ENEMY_BULLET_SPEED = 520.0
+BULLET_LIFE = 5.0
+MAX_BOUNCES = 2
+
+POWERUP_SPAWN_EVERY = 10.0
+POWERUP_LIFE = 18.0
+
+
+def reset_game(mode=None):
+    game.state = 'menu' if mode is None else 'playing'
+    game.mode = mode
+    game.start_time = time.time()
+    game.cheat = False
+    game.cam_paused = False
+    game.last_time = None
+    game.enemies = []
+    game.bullets = []
+    game.effects = []
+    game.powerups = []
+    game.wave_timer = 0.0
+    player.x = player.y = 0.0; player.z = 0.0
+    player.rot = 0.0; player.turret = 0.0
+    player.hp = player.hp_max
+    player.shield = 0.0
+    player.reload = 0.35
+    player.reload_timer = 0.0
+    player.ammo = player.ammo_max
+    player.score = 0
+    # seed enemies
+    for _ in range(5): game.enemies.append(Enemy(kind=random.choice(["rapid","heavy"])) )
+
+
+def time_left():
+    if game.mode != 'time': return None
+    remain = game.time_limit - (time.time() - game.start_time)
+    return max(0.0, remain)
+
+
+def can_shoot():
+    return player.reload_timer <= 0.0 and player.ammo>0
+
+
+def add_explosion(x,y,z, power=26):
+    game.effects.append({"x":x,"y":y,"z":z,"r":power,"life":0.25})
+
+
+def shoot(owner, tx=None, ty=None):
+    if owner=='player':
+        if not can_shoot(): return
+        gx, gy, gz = player.cannon_pos()
+        if tx is None:
+            a = to_rad(player.turret)
+            dx, dy = math.cos(a), math.sin(a)
+        else:
+            dx, dy = tx-gx, ty-gy; d = math.hypot(dx,dy) or 1.0; dx/=d; dy/=d
+        spd = PLAYER_BULLET_SPEED*(2.0 if game.cheat else 1.0)
+        game.bullets.append({"x":gx,"y":gy,"z":gz, "dx":dx,"dy":dy, "speed":spd, "life":0.0,
+                              "owner":"player", "bounces":MAX_BOUNCES, "dmg":18})
+        player.reload_timer = max(0.1, player.reload*(0.5 if player.reload<0.3 else 1.0))
+        player.ammo -= 1
+    else:
+        e = owner
+        a = to_rad(e.turret)
+        gx = e.x + math.cos(a)*30.0; gy = e.y + math.sin(a)*30.0; gz = 40.0
+        game.bullets.append({"x":gx,"y":gy,"z":gz, "dx":math.cos(a),"dy":math.sin(a),
+                              "speed":ENEMY_BULLET_SPEED, "life":0.0, "owner":"enemy",
+                              "bounces":1, "dmg":e.damage})
+        e.reload_timer = e.reload
+
+
+def auto_aim_and_fire():
+    if not game.cheat: return
+    if not can_shoot(): return
+    target = None; best = 1e9
+    for e in game.enemies:
+        d = math.hypot(e.x-player.x, e.y-player.y)
+        if d<best: best=d; target=e
+    if target is None: return
+    shoot('player', target.x, target.y)
+
+
+def update_enemies(dt):
+    # simple flank/seek behavior
+    for e in game.enemies:
+        e.time += dt
+        if e.recoil_timer > 0.0:
+            e.recoil_timer -= dt
+            continue  # Enemy is recoiling, skip movement/fire
+        # steer to side of player (flank)
+        vx, vy = player.x - e.x, player.y - e.y
+        d = math.hypot(vx,vy) or 1.0
+        vx/=d; vy/=d
+        # offset angle for flanking
+        side = 1 if (math.sin(e.time*0.6)>0) else -1
+        angle = math.atan2(vy, vx) + side*0.6
+        e.x += math.cos(angle)*e.speed*dt
+        e.y += math.sin(angle)*e.speed*dt
+        # No arena boundary
+        # face player
+        e.turret = math.degrees(math.atan2(player.y-e.y, player.x-e.x))
+        # fire
+        e.reload_timer -= dt
+        if e.reload_timer<=0.0:
+            shoot(e)
+            e.recoil_timer = 0.4  # Add recoil after firing
+
+
+def update_powerups(dt):
+    # spawn
+    game.wave_timer += dt
+    if game.wave_timer >= POWERUP_SPAWN_EVERY:
+        game.wave_timer = 0.0
+        game.powerups.append(PowerUp(random.choice(["health","reload","shield"])) )
+    # life and pickup
+    rem = []
+    for i,p in enumerate(game.powerups):
+        p.time += dt
+        if p.time>POWERUP_LIFE:
+            rem.append(i); continue
+        if (player.x-p.x)**2 + (player.y-p.y)**2 <= (player.radius+18)**2:
+            if p.kind=="health": player.hp = clamp(player.hp+35, 0, player.hp_max)
+            elif p.kind=="reload": player.reload = max(0.18, player.reload*0.75)
+            else: player.shield = max(player.shield, 8.0)
+            rem.append(i)
+    for i in reversed(rem): game.powerups.pop(i)
+
+
+def ricochet(b):
+    # No ricochet, just pass
+    pass
+
+def update_bullets(dt):
+    rem = []
+    for i,b in enumerate(game.bullets):
+        b["x"] += b["dx"]*b["speed"]*dt
+        b["y"] += b["dy"]*b["speed"]*dt
+        b["life"] += dt
+        ricochet(b)
+        # expire
+        if b["life"]>BULLET_LIFE or b["bounces"]<0:
+            rem.append(i); continue
+        # collisions
+        if b["owner"]=="player":
+            for e in game.enemies:
+                if (b["x"]-e.x)**2 + (b["y"]-e.y)**2 <= (e.radius+10)**2:
+                    e.hp -= b["dmg"]
+                    add_explosion(b["x"], b["y"], 24)
+                    rem.append(i)
+                    if e.hp<=0:
+                        player.score += 1
+                        # respawn
+                        game.enemies.remove(e)
+                        game.enemies.append(Enemy(kind=random.choice(["rapid","heavy"])) )
+                    break
+        else:
+            # hit player
+            if (b["x"]-player.x)**2 + (b["y"]-player.y)**2 <= (player.radius+10)**2:
+                if player.shield>0.0:
+                    add_explosion(b["x"], b["y"], 24)
+                elif not game.cheat:  # infinite health in cheat
+                    player.hp -= b["dmg"]
+                    player.flash = 0.25
+                    add_explosion(player.x, player.y, 26)
+                rem.append(i)
+    for i in reversed(rem):
+        if i<len(game.bullets): game.bullets.pop(i)
+
+
+def update_effects(dt):
+    rem=[]
+    for i,e in enumerate(game.effects):
+        e["life"] -= dt
+        e["r"] += 60*dt
+        if e["life"]<=0: rem.append(i)
+    for i in reversed(rem):
+        if i<len(game.effects): game.effects.pop(i)
+
+
+def spawn_enemies_over_time(dt):
+    if game.mode!='survival': return
+    # increase difficulty
+    if len(game.enemies) < game.max_enemies:
+        if random.random()<0.01 + 0.001*player.score:
+            game.enemies.append(Enemy(kind=random.choice(["rapid","heavy"])) )
+
+# ------------------------------- Input -------------------------------
+
+def on_key(k, x, y):
+    k = k.lower(); keys.add(k)
+    if game.state=='menu':
+        if k==b'1': reset_game('survival')
+        elif k==b'2': reset_game('time')
+        elif k==b'\r': reset_game('survival')
+        elif k==b'\x1b': glutLeaveMainLoop() if hasattr(glutLeaveMainLoop, '__call__') else None
+        return
+    if k==b'\x1b':
+        if game.state=='playing': game.state='paused'
+        elif game.state=='paused': game.state='playing'
+        return
+    if k==b'c':
+        game.cheat = not game.cheat
+        if not game.cheat:
+            game.cam_paused = False; cam.fp_yaw_lock = None
+    if k==b'v':
+        if cam.fp and game.cheat:
+            game.cam_paused = not game.cam_paused
+            cam.fp_yaw_lock = player.turret if game.cam_paused else None
+    if k==b'r' and (game.state=='gameover' or game.state=='paused'):
+        reset_game(game.mode)
+
+
+def on_key_up(k, x, y):
+    keys.discard(k.lower())
+
+
+def on_special(k, x, y):
+    if k == GLUT_KEY_UP: cam.move_height(20.0)
+    elif k == GLUT_KEY_DOWN: cam.move_height(-20.0)
+    elif k == GLUT_KEY_LEFT: cam.rotate(-3.0)
+    elif k == GLUT_KEY_RIGHT: cam.rotate(3.0)
+
+
+def on_mouse(btn, state, x, y):
+    if game.state!='playing':
+        if btn==GLUT_LEFT_BUTTON and state==GLUT_DOWN and game.state=='menu':
+            reset_game('survival')
+        return
+    if btn==GLUT_LEFT_BUTTON and state==GLUT_DOWN:
+        shoot('player')
+    elif btn==GLUT_RIGHT_BUTTON and state==GLUT_DOWN:
+        cam.fp = not cam.fp
+
+
+def on_motion(x, y):
+    global mouse_last
+    if mouse_last is None: mouse_last = (x,y); return
+    dx = x - mouse_last[0]
+    player.turret = (player.turret - dx*0.25) % 360.0  # Fix mouse inversion
+    mouse_last = (x,y)
+
+# ------------------------------- Per-frame -------------------------------
+
+def handle_input(dt):
+    if game.state!='playing': return
+    # strafing movement on A/D, forward/back W/S, turret is independent (Q/E)
+    mvx = 0.0; mvy = 0.0
+    if b'w' in keys: mvy += 1.0
+    if b's' in keys: mvy -= 1.0
+    if b'd' in keys: mvx += 1.0
+    if b'a' in keys: mvx -= 1.0
+    hull_angle = to_rad(player.turret)  # move relative to turret forward for simplicity
+    # forward/back along turret forward, strafe perpendicular
+    fx, fy = math.cos(hull_angle), math.sin(hull_angle)
+    sx, sy = -fy, fx
+    nx = player.x + (fx*mvy + sx*mvx)*player.speed*dt
+    ny = player.y + (fy*mvy + sy*mvx)*player.speed*dt
+    # No arena boundary
+    player.x = nx
+    player.y = ny
+    # turret keys
+    if b'q' in keys: player.turret = (player.turret + 160.0*dt) % 360.0
+    if b'e' in keys: player.turret = (player.turret - 160.0*dt) % 360.0
+    # timers
+    player.reload_timer = max(0.0, player.reload_timer - dt)
+    if player.shield>0.0: player.shield = max(0.0, player.shield - dt)
+    if player.flash>0.0: player.flash = max(0.0, player.flash - dt)
+    # cheat auto-aim
+    auto_aim_and_fire()
+
+
+def update(dt):
+    if game.state!='playing': return
+    update_enemies(dt)
+    update_bullets(dt)
+    update_effects(dt)
+    update_powerups(dt)
+    spawn_enemies_over_time(dt)
+    # mode checks
+    if game.mode=='time' and time_left()==0.0:
+        game.state='gameover'
+    if player.hp<=0 and not game.cheat:
+        game.state='gameover'
+
+# ------------------------------- Draw frame -------------------------------
+
+def draw_scene():
+    draw_floor()
+    draw_trees()
+    for p in game.powerups: draw_powerup(p)
+    for e in game.enemies: draw_enemy(e)
+    draw_player()
+    for b in game.bullets: draw_bullet(b)
+    for ex in game.effects: draw_explosion(ex)
+
+
+def draw_hud():
+    # health
+    draw_bar(20, 30, 260, 18, (player.hp/player.hp_max) if not game.cheat else 1.0)
+    draw_text(24, 26, f"HP: {'∞' if game.cheat else player.hp}")
+    # ammo
+    draw_bar(20, 60, 260, 14, player.ammo/player.ammo_max)
+    draw_text(24, 56, f"Ammo: {player.ammo}/{player.ammo_max}")
+    # score & mode
+    mode = 'Survival' if game.mode=='survival' else 'Time Attack'
+    draw_text(20, 90, f"Score: {player.score}   Mode: {mode}")
+    # timer for time mode
+    if game.mode=='time':
+        tl = time_left()
+        draw_text(20, 120, f"Time Left: {int(tl//60)}:{int(tl%60):02d}")
+    if game.cheat:
+        draw_text(20, 150, "CHEAT: Auto-aim + 2x speed + Infinite HP")
+    draw_minimap()
+
+
+def draw_menu():
+    draw_text(WIN_W//2-140, 220, "3D TANK BATTLE", size=18)
+    draw_text(WIN_W//2-220, 280, "Press 1 = Survival   |   Press 2 = Time Attack (2:00)")
+    draw_text(WIN_W//2-180, 320, "Controls: WASD move, Q/E turret, Mouse/LMB shoot, RMB camera")
+    draw_text(WIN_W//2-140, 360, "Esc Pause, C Cheat, Power-ups: Health/Reload/Shield")
+
+
+def draw_pause():
+    draw_text(WIN_W//2-60, WIN_H//2-10, "PAUSED")
+    draw_text(WIN_W//2-140, WIN_H//2+30, "Press Esc to Resume | R to Restart")
+
+
+def draw_gameover():
+    draw_text(WIN_W//2-90, WIN_H//2-20, "GAME OVER")
+    draw_text(WIN_W//2-120, WIN_H//2+20, f"Score: {player.score}")
+    draw_text(WIN_W//2-180, WIN_H//2+60, "Press R to Restart or Esc for Menu")
+
+# ------------------------------- GLUT hooks -------------------------------
+
+def display():
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    glViewport(0, 0, WIN_W, WIN_H)
+    setup_camera()
+    if game.state=='menu':
+        draw_scene(); draw_menu()
+    elif game.state=='paused':
+        draw_scene(); draw_pause(); draw_hud()
+    elif game.state=='gameover':
+        draw_scene(); draw_gameover(); draw_hud()
+    else:
+        draw_scene(); draw_hud()
+    glutSwapBuffers()
+
+
+def idle():
+    t = time.time()
+    if game.last_time is None: game.last_time = t
+    dt = clamp(t - game.last_time, 0.0, 0.05)  # avoid huge steps
+    game.last_time = t
+    if game.state=='playing':
+        handle_input(dt)
+        update(dt)
+    glutPostRedisplay()
+
+
+def init_gl():
+    glClearColor(0.05,0.05,0.08,1)
+    glEnable(GL_DEPTH_TEST)
+    glShadeModel(GL_SMOOTH)
+    glEnable(GL_COLOR_MATERIAL)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    # soft light
+    glEnable(GL_LIGHTING)
+    glEnable(GL_LIGHT0)
+    glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(200.0, -300.0, 600.0, 1.0))
+    glLightfv(GL_LIGHT0, GL_DIFFUSE,  (GLfloat * 4)(0.8, 0.8, 0.8, 1.0))
+
+# ------------------------------- Main -------------------------------
+
+def main():
+    glutInit()
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
+    glutInitWindowSize(WIN_W, WIN_H)
+    glutInitWindowPosition(40, 30)
+    glutCreateWindow(b"3D Tank Battle")
+    init_gl()
+    reset_game(None)  # land in main menu
+    glutDisplayFunc(display)
+    glutKeyboardFunc(on_key)
+    glutKeyboardUpFunc(on_key_up)
+    glutSpecialFunc(on_special)
+    glutMouseFunc(on_mouse)
+    glutPassiveMotionFunc(on_motion)
+    glutIdleFunc(idle)
+    glutMainLoop()
+
+if __name__ == "__main__":
+    main()
