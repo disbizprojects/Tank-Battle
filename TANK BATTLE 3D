@@ -80,7 +80,6 @@ class PowerUp:
         self.z = 0
         self.time = 0.0
 
-# ------------------------------- Game State -------------------------------
 class Game:
     def __init__(self):
         self.state = 'menu'             # 'menu', 'playing', 'paused', 'gameover'
@@ -107,7 +106,6 @@ game = Game()
 keys = set()
 mouse_last = None
 
-# ------------------------------- Helpers -------------------------------
 def clamp(v, lo, hi): return max(lo, min(hi, v))
 def to_rad(deg): return deg*math.pi/180.0
 
@@ -116,7 +114,6 @@ def spawn_pos(inner=0.85):
     a = random.uniform(0, 2*math.pi)
     return r*math.cos(a), r*math.sin(a)
 
-# ------------------------------- Rendering -------------------------------
 
 def draw_floor():
     # Checkerboard floor: alternating gray and light-gray tiles
@@ -277,7 +274,6 @@ def draw_explosion(ex):
     glutWireSphere(ex["r"], 10, 10)
     glPopMatrix()
 
-# ------------------------------- UI -------------------------------
 
 #mahpara draw text---------------------------
 def draw_text(x, y, s, size=22):
@@ -362,7 +358,6 @@ def draw_minimap():
     glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
 
 
-# ------------------------------- Camera -------------------------------
 
 #mahpara setup camera---------------------------
 def setup_camera():
@@ -382,8 +377,6 @@ def setup_camera():
         gluLookAt(cx,cy,cz, player.x, player.y, 40.0, 0,0,1)
 
 
-# ------------------------------- Game Logic -------------------------------
-
 PLAYER_BULLET_SPEED = 820.0
 ENEMY_BULLET_SPEED = 520.0
 BULLET_LIFE = 5.0
@@ -391,7 +384,6 @@ MAX_BOUNCES = 2
 
 POWERUP_SPAWN_EVERY = 10.0
 POWERUP_LIFE = 18.0
-
 
 def reset_game(mode=None):
     game.state = 'menu' if mode is None else 'playing'
@@ -580,7 +572,6 @@ def spawn_enemies_over_time(dt):
         if random.random()<0.01 + 0.001*player.score:
             game.enemies.append(Enemy(kind=random.choice(["rapid","heavy"])) )
 
-# ------------------------------- Input -------------------------------
 
 def on_key(k, x, y):
     k = k.lower(); keys.add(k)
@@ -670,7 +661,7 @@ def screen_to_world(mx, my):
     except Exception:
         return None, None
 
-# ------------------------------- Per-frame -------------------------------
+
 
 def handle_input(dt):
     if game.state!='playing': return
@@ -711,7 +702,6 @@ def handle_input(dt):
 
 #rafeur update---------------------------
 
-#rafeur draw hud---------------------------
 def update(dt):
     if game.state!='playing': return
     update_enemies(dt)
@@ -725,7 +715,7 @@ def update(dt):
     if player.hp<=0 and not game.cheat:
         game.state='gameover'
 
-# ------------------------------- Draw frame -------------------------------
+
 
 def draw_scene():
     draw_floor()
@@ -818,6 +808,8 @@ def display():
         draw_scene(); draw_hud()
     glutSwapBuffers()
 
+def ricochet(b):
+    pass
 
 def idle():
     t = time.time()
@@ -843,7 +835,7 @@ def init_gl():
     glLightfv(GL_LIGHT0, GL_POSITION, (GLfloat * 4)(200.0, -300.0, 600.0, 1.0))
     glLightfv(GL_LIGHT0, GL_DIFFUSE,  (GLfloat * 4)(0.8, 0.8, 0.8, 1.0))
 
-# ------------------------------- Main -------------------------------
+
 
 def main():
     glutInit()
