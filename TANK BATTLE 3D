@@ -284,6 +284,45 @@ def draw_bar(x, y, w, h, t):
 
 
 #rafeur draw minimap---------------------------
+def draw_minimap():
+    # simple radar bottom-right
+    r = 90; cx = WIN_W - r - 20; cy = r + 20
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, WIN_W, 0, WIN_H)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity(); glDisable(GL_DEPTH_TEST)
+    # background black
+    glColor3f(0.0,0.0,0.0)
+    glBegin(GL_POLYGON)
+    for i in range(64):
+        a = 2*math.pi*i/64
+        glVertex2f(cx + r*math.cos(a), cy + r*math.sin(a))
+    glEnd()
+    # border
+    glColor3f(0.1,0.1,0.1)
+    glBegin(GL_LINE_LOOP)
+    for i in range(64):
+        a = 2*math.pi*i/64
+        glVertex2f(cx + r*math.cos(a), cy + r*math.sin(a))
+    glEnd()
+    # player at center
+    glPointSize(6); glBegin(GL_POINTS); glColor3f(0.2,1,0.2); glVertex2f(cx,cy); glEnd()
+    # enemies
+    glPointSize(4); glBegin(GL_POINTS); glColor3f(1,0.2,0.2)
+    for e in game.enemies:
+        dx = e.x - player.x
+        dy = e.y - player.y
+        dist = math.hypot(dx, dy)
+        max_dist = ARENA
+        if dist > max_dist:
+            scale = max_dist / dist
+            dx *= scale
+            dy *= scale
+        ex = dx / ARENA
+        ey = dy / ARENA
+        glVertex2f(cx + ex*r, cy + ey*r)
+    glEnd()
+    glEnable(GL_DEPTH_TEST)
+    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
 
 # ------------------------------- Camera -------------------------------
 
@@ -381,9 +420,54 @@ def auto_aim_and_fire():
     shoot('player', target.x, target.y)
 
 
-#rafeur update enemies---------------------------
+def update_enemies(dt):
+    # simple flank/seek behavior
+    for e in game.enemies:
+        e.time += dt
+        if e.recoil_timer > 0.0:
+            e.recoil_timer -= dt
+            continue  # Enemy is recoiling, skip movement/fire
+        # steer to side of player (flank)
+        vx, vy = player.x - e.x, player.y - e.y
+        d = math.hypot(vx,vy) or 1.0
+        vx/=d; vy/=d
+        # offset angle for flanking
+        side = 1 if (math.sin(e.time*0.6)>0) else -1
+        angle = math.atan2(vy, vx) + side*0.6
+        e.x += math.cos(angle)*e.speed*dt
+        e.y += math.sin(angle)*e.speed*dt
+        # No arena boundary
+        # face player
+        e.turret = math.degrees(math.atan2(player.y-e.y, player.x-e.x))
+        # fire
+        e.reload_timer -= dt
+        if e.reload_timer<=0.0:
+            shoot(e)
+            e.recoil_timer = 0.4  # Add recoil after firing
 
-# rafeur update powerups---------------------------
+def update_powerups(dt):
+    # spawn
+    game.wave_timer += dt
+    if game.wave_timer >= POWERUP_SPAWN_EVERY:
+        game.wave_timer = 0.0
+        game.powerups.append(PowerUp(random.choice(["health","double","invincible"])) )
+    # life and pickup
+    rem = []
+    for i,p in enumerate(game.powerups):
+        p.time += dt
+        if p.time>POWERUP_LIFE:
+            rem.append(i); continue
+        if (player.x-p.x)**2 + (player.y-p.y)**2 <= (player.radius+32)**2:
+            if p.kind=="health":
+                player.hp = clamp(player.hp+20, 0, player.hp_max)
+            elif p.kind=="double":
+                player.double_bullet = True
+                player.double_bullet_timer = 10.0
+            elif p.kind=="invincible":
+                player.invincible = True
+                player.invincible_timer = 10.0
+            rem.append(i)
+    for i in reversed(rem): game.powerups.pop(i)
 
 
 def update_bullets(dt):
@@ -574,6 +658,54 @@ def handle_input(dt):
 #rafeur update---------------------------
 
 #rafeur draw hud---------------------------
+def update(dt):
+    if game.state!='playing': return
+    update_enemies(dt)
+    update_bullets(dt)
+    update_effects(dt)
+    update_powerups(dt)
+    spawn_enemies_over_time(dt)
+    # mode checks
+    if game.mode=='time' and time_left()==0.0:
+        game.state='gameover'
+    if player.hp<=0 and not game.cheat:
+        game.state='gameover'
+
+# ------------------------------- Draw frame -------------------------------
+
+def draw_scene():
+    draw_floor()
+    draw_trees()
+    for p in game.powerups: draw_powerup(p)
+    for e in game.enemies: draw_enemy(e)
+    draw_player()
+    for b in game.bullets: draw_bullet(b)
+    for ex in game.effects: draw_explosion(ex)
+
+
+
+
+
+def draw_hud():
+    # health
+    draw_bar(20, 30, 260, 18, (player.hp/player.hp_max) if not game.cheat else 1.0)
+    draw_text(24, 26, f"HP: {'∞' if game.cheat else player.hp}")
+    # ammo
+    draw_bar(20, 60, 260, 14, player.ammo/player.ammo_max)
+    draw_text(24, 56, f"Ammo: {player.ammo}/{player.ammo_max}")
+    # score & mode
+    mode = 'Survival' if game.mode=='survival' else 'Time Attack'
+    draw_text(20, 90, f"Score: {player.score}   Mode: {mode}")
+    # timer for time mode
+    if game.mode=='time':
+        tl = time_left()
+        draw_text(20, 120, f"Time Left: {int(tl//60)}:{int(tl%60):02d}")
+    if game.cheat:
+        draw_text(20, 150, "CHEAT: Auto-aim + 2x speed + Infinite HP")
+    draw_minimap()
+    # First-person aiming reticle
+    if cam.fp:
+        draw_reticle()
 
 
 def draw_reticle():
