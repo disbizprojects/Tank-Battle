@@ -15,6 +15,17 @@ TREE_COUNT = 30
 tree_positions = [(random.uniform(-3000, 3000), random.uniform(-3000, 3000)) for _ in range(TREE_COUNT)]
 
 #mahpara camera---------------------------
+class Camera:
+    def __init__(self):
+        self.orbit = 35.0
+        self.height = 260.0
+        self.dist = 900.0
+        self.fp = False
+        self.fp_yaw_lock = None
+    def rotate(self, d): self.orbit = (self.orbit + d) % 360.0
+    def move_height(self, d): self.height = max(140.0, min(900.0, self.height + d))
+
+
 
 # Entities
 class Player:
@@ -269,6 +280,33 @@ def draw_explosion(ex):
 # ------------------------------- UI -------------------------------
 
 #mahpara draw text---------------------------
+def draw_text(x, y, s, size=22):
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, WIN_W, 0, WIN_H)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+    glDisable(GL_DEPTH_TEST)
+    # Use white for maximum contrast
+    glColor3f(1.0, 0.0, 0.0)
+    glRasterPos2f(x, WIN_H-y)
+    # Robust font lookup: prefer global constants, fall back to importing module
+    if size >= 18:
+        font = globals().get('GLUT_BITMAP_HELVETICA_18')
+    else:
+        font = globals().get('GLUT_BITMAP_9_BY_15')
+    if font is None:
+        try:
+            import OpenGL.GLUT as _glut
+            font = getattr(_glut, 'GLUT_BITMAP_HELVETICA_18' if size>=18 else 'GLUT_BITMAP_9_BY_15', None)
+        except Exception:
+            font = None
+    for ch in s:
+        if font is None:
+            # nothing to render
+            continue
+        glutBitmapCharacter(font, ord(ch))
+    glEnable(GL_DEPTH_TEST)
+    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
+
 
 
 def draw_bar(x, y, w, h, t):
@@ -327,6 +365,22 @@ def draw_minimap():
 # ------------------------------- Camera -------------------------------
 
 #mahpara setup camera---------------------------
+def setup_camera():
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); gluPerspective(FOV, ASPECT, 0.1, 3000.0)
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity()
+    if cam.fp:
+        hx, hy, hz = player.head_pos()
+        a = to_rad(player.turret if (game.cheat and game.cam_paused and cam.fp_yaw_lock is not None) else player.turret)
+        cx = hx - math.cos(a)*0.1; cy = hy - math.sin(a)*0.1; cz = hz*2
+        tx = hx + math.cos(a)*150.0; ty = hy + math.sin(a)*150.0; tz = hz
+        gluLookAt(cx,cy,cz, tx,ty,tz, 0,0,1)
+    else:
+        a = to_rad(cam.orbit)
+        cx = player.x + math.cos(a)*cam.dist
+        cy = player.y + math.sin(a)*cam.dist
+        cz = cam.height
+        gluLookAt(cx,cy,cz, player.x, player.y, 40.0, 0,0,1)
+
 
 # ------------------------------- Game Logic -------------------------------
 
@@ -730,6 +784,23 @@ def draw_reticle():
 
 
 #mahpara draw menu---------------------------
+def draw_menu():
+    draw_text(WIN_W//2-140, 150, "3D TANK BATTLE", size=26)
+    draw_text(WIN_W//2-140, 180, "Press 1 = Survival   |   Press 2 = Time Attack (2:00)")
+    draw_text(WIN_W//2-140, 220, "Controls: WASD move, Q/E turret, Mouse/LMB shoot, RMB camera")
+    draw_text(WIN_W//2-140, 260, "Esc Pause, C Cheat, Power-ups: Health/Reload/Shield")
+
+
+def draw_pause():
+    draw_text(WIN_W//2-60, WIN_H//2-10, "PAUSED")
+    draw_text(WIN_W//2-140, WIN_H//2+30, "Press Esc to Resume | R to Restart")
+
+
+def draw_gameover():
+    draw_text(WIN_W//2-90, WIN_H//2-20, "GAME OVER")
+    draw_text(WIN_W//2-120, WIN_H//2+20, f"Score: {player.score}")
+    draw_text(WIN_W//2-180, WIN_H//2+60, "Press R to Restart or Esc for Menu")
+
 
 # ------------------------------- GLUT hooks -------------------------------
 
